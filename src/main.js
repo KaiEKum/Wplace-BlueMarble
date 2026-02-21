@@ -573,8 +573,8 @@ function buildOverlayMain() {
       .buildElement()
       .addInputFile({'id': 'bm-input-file-template', 'textContent': 'Upload Template', 'accept': 'image/png, image/jpeg, image/webp, image/bmp, image/gif'}).buildElement()
       .addDiv({'class': 'bm-url-input-container'})
-        .addText({'textContent': 'Or use URL:'}).buildElement()
-        .addInputText({'id': 'bm-input-url-template', 'placeholder': 'https://example.com/template.png'}).buildElement()
+        .addSmall({'textContent': 'Or use URL:'}).buildElement()
+        .addInput({'type': 'text', 'id': 'bm-input-url-template', 'placeholder': 'https://example.com/template.png'}).buildElement()
       .buildElement()
       .addDiv({'id': 'bm-contain-buttons-template'})
         .addButton({'id': 'bm-button-enable', 'textContent': 'Enable'}, (instance, button) => {

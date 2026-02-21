@@ -195,8 +195,15 @@ export default class TemplateManager {
         const parsedJSON = JSON.parse(savedTemplatesJSON);
         console.log('Loading saved templates...', parsedJSON);
         
+        // Set the templatesJSON to the loaded data FIRST
+        this.templatesJSON = parsedJSON;
+        console.log('Set this.templatesJSON to loaded data:', this.templatesJSON);
+        
         // Import the saved templates (this will handle both file-based and URL-based templates)
         this.importJSON(parsedJSON);
+        
+        // Verify templatesJSON is still set after import
+        console.log('After importJSON, this.templatesJSON:', this.templatesJSON);
         
         // Auto-refresh URL-based templates
         await this.refreshURLTemplates();
@@ -213,16 +220,26 @@ export default class TemplateManager {
    * @since 0.72.8
    */
   async refreshURLTemplates(force = false) {
-    if (!this.templatesJSON?.templates) return;
+    console.log('refreshURLTemplates called, force:', force);
+    console.log('templatesJSON:', this.templatesJSON);
+    
+    if (!this.templatesJSON?.templates) {
+      console.log('No templatesJSON.templates found');
+      return;
+    }
 
     const refreshPromises = [];
     
     for (const [storageKey, templateData] of Object.entries(this.templatesJSON.templates)) {
+      console.log(`Checking template ${storageKey}:`, templateData);
+      
       // Only refresh templates that have URLs
       if (templateData.URL && templateData.URLType === 'template') {
         // Check if we should refresh (force or if it's been more than 5 minutes)
         const lastUpdated = templateData.lastUpdated || 0;
         const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
+        
+        console.log(`Template ${templateData.name} - lastUpdated: ${lastUpdated}, fiveMinutesAgo: ${fiveMinutesAgo}, shouldRefresh: ${force || lastUpdated < fiveMinutesAgo}`);
         
         if (force || lastUpdated < fiveMinutesAgo) {
           console.log(`Refreshing URL template: ${templateData.name} from ${templateData.URL}`);
@@ -230,6 +247,8 @@ export default class TemplateManager {
           const refreshPromise = this.#refreshSingleURLTemplate(storageKey, templateData);
           refreshPromises.push(refreshPromise);
         }
+      } else {
+        console.log(`Template ${storageKey} does not have URL or URLType`);
       }
     }
 
@@ -237,6 +256,9 @@ export default class TemplateManager {
       this.overlay.handleDisplayStatus(`Refreshing ${refreshPromises.length} URL template${refreshPromises.length === 1 ? '' : 's'}...`);
       await Promise.allSettled(refreshPromises);
       this.overlay.handleDisplayStatus(`Template refresh complete!`);
+    } else {
+      console.log('No URL templates found to refresh');
+      this.overlay.handleDisplayStatus('No URL templates found to refresh');
     }
   }
 
@@ -248,54 +270,78 @@ export default class TemplateManager {
   async #refreshSingleURLTemplate(storageKey, templateData) {
     try {
       const coords = templateData.coords.split(',').map(Number);
+      const url = templateData.URL;
       
-      // Fetch the latest version from URL
-      const response = await fetch(templateData.URL);
+      // Use api.codetabs.com proxy for all URLs with cache busting
+      const cacheBuster = `cb=${Date.now()}`;
+      const urlWithCacheBuster = url.includes('?') ? `${url}&${cacheBuster}` : `${url}?${cacheBuster}`;
+      const proxiedUrl = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(urlWithCacheBuster)}`;
+      
+      console.log(`Refreshing template from: ${proxiedUrl}`);
+      
+      const response = await fetch(proxiedUrl, {
+        method: 'GET',
+        mode: 'cors',
+        headers: {
+          'Accept': 'image/*,*/*'
+        }
+      });
+      
       if (!response.ok) {
-        console.warn(`Failed to refresh template ${templateData.name}: ${response.status}`);
-        return;
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
       const blob = await response.blob();
-      
-      // Create updated template
-      const template = new Template({
-        displayName: templateData.name,
-        sortID: 0,
-        authorID: numberToEncoded(this.userID || 0, this.encodingBase),
-        file: blob,
-        coords: coords,
-        url: templateData.URL
-      });
-
-      const { templateTiles, templateTilesBuffers } = await template.createTemplateTiles(this.tileSize);
-      template.chunked = templateTiles;
-
-      // Update the stored template data
-      this.templatesJSON.templates[storageKey] = {
-        ...templateData,
-        "lastUpdated": Date.now(),
-        "tiles": templateTilesBuffers,
-        "palette": template.colorPalette
-      };
-
-      // Update the templates array
-      const existingIndex = this.templatesArray.findIndex(t => t.storageKey === storageKey);
-      if (existingIndex >= 0) {
-        template.storageKey = storageKey;
-        template.colorPalette = { ...template.colorPalette, ...templateData.palette }; // Preserve enabled/disabled states
-        this.templatesArray[existingIndex] = template;
-      } else {
-        template.storageKey = storageKey;
-        this.templatesArray.push(template);
-      }
-
-      await this.#storeTemplates();
+      await this.#processRefreshedTemplate(blob, templateData, storageKey, coords);
       console.log(`Successfully refreshed template: ${templateData.name}`);
       
     } catch (error) {
       console.error(`Failed to refresh template ${templateData.name}:`, error);
     }
+  }
+
+  /** Helper method to process refreshed template blob
+   * @param {Blob} blob - The image blob
+   * @param {Object} templateData - Original template data
+   * @param {string} storageKey - Storage key for the template
+   * @param {Array<number>} coords - Template coordinates
+   * @private
+   */
+  async #processRefreshedTemplate(blob, templateData, storageKey, coords) {
+    // Create updated template
+    const template = new Template({
+      displayName: templateData.name,
+      sortID: 0,
+      authorID: numberToEncoded(this.userID || 0, this.encodingBase),
+      file: blob,
+      coords: coords,
+      url: templateData.URL
+    });
+
+    const { templateTiles, templateTilesBuffers } = await template.createTemplateTiles(this.tileSize);
+    template.chunked = templateTiles;
+
+    // Update the stored template data
+    this.templatesJSON.templates[storageKey] = {
+      ...templateData,
+      "lastUpdated": Date.now(),
+      "tiles": templateTilesBuffers,
+      "palette": template.colorPalette
+    };
+
+    // Update the templates array
+    const existingIndex = this.templatesArray.findIndex(t => t.storageKey === storageKey);
+    if (existingIndex >= 0) {
+      template.storageKey = storageKey;
+      template.colorPalette = { ...template.colorPalette, ...templateData.palette }; // Preserve enabled/disabled states
+      this.templatesArray[existingIndex] = template;
+    } else {
+      template.storageKey = storageKey;
+      this.templatesArray.push(template);
+    }
+
+    await this.#storeTemplates();
+    console.log(`Successfully refreshed template: ${templateData.name}`);
   }
 
   /** Generates a {@link Template} class instance from the JSON object template
@@ -309,6 +355,8 @@ export default class TemplateManager {
    * @since 0.72.7
    */
   async #storeTemplates() {
+    console.log('Storing templates to GM storage:', this.templatesJSON);
+    console.log('Templates object keys:', Object.keys(this.templatesJSON?.templates || {}));
     GM.setValue('bmTemplates', JSON.stringify(this.templatesJSON));
   }
 
@@ -668,6 +716,9 @@ export default class TemplateManager {
   async #parseBlueMarble(json) {
 
     console.log(`Parsing BlueMarble...`);
+    
+    // IMPORTANT: Set templatesJSON to the loaded data to preserve URL template metadata
+    this.templatesJSON = json;
 
     const templates = json.templates;
 
@@ -813,12 +864,24 @@ export default class TemplateManager {
       // Creates the JSON object if it does not already exist
       if (!this.templatesJSON) {this.templatesJSON = await this.createJSON(); console.log(`Creating JSON...`);}
 
-      this.overlay.handleDisplayStatus(`Fetching template from URL: ${url}...`);
-
-      // Fetch the image from the URL
-      const response = await fetch(url);
+      // Use api.codetabs.com proxy for all URLs with cache busting
+      const cacheBuster = `cb=${Date.now()}`;
+      const urlWithCacheBuster = url.includes('?') ? `${url}&${cacheBuster}` : `${url}?${cacheBuster}`;
+      const proxiedUrl = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(urlWithCacheBuster)}`;
+      
+      this.overlay.handleDisplayStatus(`Fetching template from URL via CORS proxy...`);
+      console.log(`Fetching template from: ${proxiedUrl}`);
+      
+      const response = await fetch(proxiedUrl, {
+        method: 'GET',
+        mode: 'cors',
+        headers: {
+          'Accept': 'image/*,*/*'
+        }
+      });
+      
       if (!response.ok) {
-        throw new Error(`Failed to fetch image: ${response.status} ${response.statusText}`);
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
       const blob = await response.blob();
@@ -828,57 +891,70 @@ export default class TemplateManager {
         throw new Error(`URL does not point to an image. Content type: ${blob.type}`);
       }
 
-      this.overlay.handleDisplayStatus(`Creating template from URL at ${coords.join(', ')}...`);
-
-      // Creates a new template instance
-      const template = new Template({
-        displayName: name,
-        sortID: 0,
-        authorID: numberToEncoded(this.userID || 0, this.encodingBase),
-        file: blob,
-        coords: coords,
-        url: url // Store the URL for refreshing
-      });
-
-      const { templateTiles, templateTilesBuffers } = await template.createTemplateTiles(this.tileSize);
-      template.chunked = templateTiles;
-
-      // Appends a child into the templates object with URL information
-      const storageKey = `${template.sortID} ${template.authorID}`;
-      template.storageKey = storageKey;
-      this.templatesJSON.templates[storageKey] = {
-        "name": template.displayName,
-        "coords": coords.join(', '),
-        "enabled": true,
-        "URL": url, // Store the URL for auto-refresh
-        "URLType": "template",
-        "lastUpdated": Date.now(), // Track when it was last updated
-        "tiles": templateTilesBuffers,
-        "palette": template.colorPalette
-      };
-
-      this.templatesArray = []; // Remove this to enable multiple templates
-      this.templatesArray.push(template);
-
-      // Display success message
-      const pixelCountFormatted = new Intl.NumberFormat().format(template.pixelCount);
-      this.overlay.handleDisplayStatus(`Template created from URL! Total pixels: ${pixelCountFormatted}`);
-
-      // Ensure color filter UI is visible when a template is created
-      try {
-        const colorUI = document.querySelector('#bm-contain-colorfilter');
-        if (colorUI) { colorUI.style.display = ''; }
-        window.postMessage({ source: 'blue-marble', bmEvent: 'bm-rebuild-color-list' }, '*');
-      } catch (_) { /* no-op */ }
-
-      await this.#storeTemplates();
-      return template;
+      console.log(`Successfully fetched image from URL via CORS proxy`);
+      return this.#createTemplateFromBlob(blob, name, coords, url);
 
     } catch (error) {
       console.error('Failed to create template from URL:', error);
       this.overlay.handleDisplayStatus(`Failed to load template: ${error.message}`);
       throw error;
     }
+  }
+
+  /** Helper method to create template from blob
+   * @param {Blob} blob - The image blob
+   * @param {string} name - The display name of the template  
+   * @param {Array<number>} coords - The coordinates
+   * @param {string} url - The original URL
+   * @returns {Template} The created template
+   * @private
+   */
+  async #createTemplateFromBlob(blob, name, coords, url) {
+    this.overlay.handleDisplayStatus(`Creating template from URL at ${coords.join(', ')}...`);
+
+    // Creates a new template instance
+    const template = new Template({
+      displayName: name,
+      sortID: 0,
+      authorID: numberToEncoded(this.userID || 0, this.encodingBase),
+      file: blob,
+      coords: coords,
+      url: url // Store the original URL for refreshing
+    });
+
+    const { templateTiles, templateTilesBuffers } = await template.createTemplateTiles(this.tileSize);
+    template.chunked = templateTiles;
+
+    // Appends a child into the templates object with URL information
+    const storageKey = `${template.sortID} ${template.authorID}`;
+    template.storageKey = storageKey;
+    this.templatesJSON.templates[storageKey] = {
+      "name": template.displayName,
+      "coords": coords.join(', '),
+      "enabled": true,
+      "URL": url, // Store the original URL for auto-refresh
+      "URLType": "template",
+      "lastUpdated": Date.now(), // Track when it was last updated
+      "tiles": templateTilesBuffers,
+      "palette": template.colorPalette
+    };
+
+    this.templatesArray = []; // Remove this to enable multiple templates
+    this.templatesArray.push(template);
+
+    // Display success message
+    const pixelCountFormatted = new Intl.NumberFormat().format(template.pixelCount);
+    this.overlay.handleDisplayStatus(`Template created from URL! Total pixels: ${pixelCountFormatted}`);
+
+    // Ensure color filter UI is visible when a template is created
+    try {
+      const colorUI = document.querySelector('#bm-contain-colorfilter');
+      if (colorUI) { colorUI.style.display = ''; }
+      window.postMessage({ source: 'blue-marble', bmEvent: 'bm-rebuild-color-list' }, '*');
+    } catch (_) { /* no-op */ }
+
+    await this.#storeTemplates();
+    return template;
   }
 
   /** Manually refresh all URL-based templates
@@ -900,11 +976,21 @@ export default class TemplateManager {
    * @since 0.72.8
    */
   hasURLTemplates() {
-    if (!this.templatesJSON?.templates) return false;
+    if (!this.templatesJSON?.templates) {
+      console.log('No templatesJSON found');
+      return false;
+    }
     
-    return Object.values(this.templatesJSON.templates).some(template => 
-      template.URL && template.URLType === 'template'
-    );
+    console.log('Checking templates for URLs:', this.templatesJSON.templates);
+    
+    const urlTemplates = Object.values(this.templatesJSON.templates).filter(template => {
+      const hasURL = template.URL && template.URLType === 'template';
+      console.log(`Template "${template.name}": URL=${template.URL}, URLType=${template.URLType}, hasURL=${hasURL}`);
+      return hasURL;
+    });
+    
+    console.log(`Found ${urlTemplates.length} URL templates`);
+    return urlTemplates.length > 0;
   }
 
   /** Get information about all URL templates
