@@ -62,6 +62,11 @@ export default class TemplateManager {
     this.templatesJSON = null; // All templates currently loaded (JSON)
     this.templatesShouldBeDrawn = true; // Should ALL templates be drawn to the canvas?
     this.tileProgress = new Map(); // Tracks per-tile progress stats {painted, required, wrong}
+
+    // Auto-load saved templates when the manager is created
+    this.loadSavedTemplates().catch(error => {
+      console.warn('Failed to auto-load saved templates:', error);
+    });
   }
 
   /** Retrieves the pixel art canvas.
@@ -179,10 +184,125 @@ export default class TemplateManager {
     await this.#storeTemplates();
   }
 
+  /** Loads all saved templates from storage, including URL-based templates
+   * This method is called on page load to restore previously saved templates
+   * @since 0.72.8
+   */
+  async loadSavedTemplates() {
+    try {
+      const savedTemplatesJSON = await GM.getValue('bmTemplates');
+      if (savedTemplatesJSON) {
+        const parsedJSON = JSON.parse(savedTemplatesJSON);
+        console.log('Loading saved templates...', parsedJSON);
+        
+        // Import the saved templates (this will handle both file-based and URL-based templates)
+        this.importJSON(parsedJSON);
+        
+        // Auto-refresh URL-based templates
+        await this.refreshURLTemplates();
+      } else {
+        console.log('No saved templates found');
+      }
+    } catch (error) {
+      console.error('Failed to load saved templates:', error);
+    }
+  }
+
+  /** Refreshes all URL-based templates by re-fetching them from their URLs
+   * @param {boolean} force - Force refresh even if recently updated
+   * @since 0.72.8
+   */
+  async refreshURLTemplates(force = false) {
+    if (!this.templatesJSON?.templates) return;
+
+    const refreshPromises = [];
+    
+    for (const [storageKey, templateData] of Object.entries(this.templatesJSON.templates)) {
+      // Only refresh templates that have URLs
+      if (templateData.URL && templateData.URLType === 'template') {
+        // Check if we should refresh (force or if it's been more than 5 minutes)
+        const lastUpdated = templateData.lastUpdated || 0;
+        const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
+        
+        if (force || lastUpdated < fiveMinutesAgo) {
+          console.log(`Refreshing URL template: ${templateData.name} from ${templateData.URL}`);
+          
+          const refreshPromise = this.#refreshSingleURLTemplate(storageKey, templateData);
+          refreshPromises.push(refreshPromise);
+        }
+      }
+    }
+
+    if (refreshPromises.length > 0) {
+      this.overlay.handleDisplayStatus(`Refreshing ${refreshPromises.length} URL template${refreshPromises.length === 1 ? '' : 's'}...`);
+      await Promise.allSettled(refreshPromises);
+      this.overlay.handleDisplayStatus(`Template refresh complete!`);
+    }
+  }
+
+  /** Refreshes a single URL-based template
+   * @param {string} storageKey - The storage key for the template
+   * @param {Object} templateData - The template data object
+   * @private
+   */
+  async #refreshSingleURLTemplate(storageKey, templateData) {
+    try {
+      const coords = templateData.coords.split(',').map(Number);
+      
+      // Fetch the latest version from URL
+      const response = await fetch(templateData.URL);
+      if (!response.ok) {
+        console.warn(`Failed to refresh template ${templateData.name}: ${response.status}`);
+        return;
+      }
+
+      const blob = await response.blob();
+      
+      // Create updated template
+      const template = new Template({
+        displayName: templateData.name,
+        sortID: 0,
+        authorID: numberToEncoded(this.userID || 0, this.encodingBase),
+        file: blob,
+        coords: coords,
+        url: templateData.URL
+      });
+
+      const { templateTiles, templateTilesBuffers } = await template.createTemplateTiles(this.tileSize);
+      template.chunked = templateTiles;
+
+      // Update the stored template data
+      this.templatesJSON.templates[storageKey] = {
+        ...templateData,
+        "lastUpdated": Date.now(),
+        "tiles": templateTilesBuffers,
+        "palette": template.colorPalette
+      };
+
+      // Update the templates array
+      const existingIndex = this.templatesArray.findIndex(t => t.storageKey === storageKey);
+      if (existingIndex >= 0) {
+        template.storageKey = storageKey;
+        template.colorPalette = { ...template.colorPalette, ...templateData.palette }; // Preserve enabled/disabled states
+        this.templatesArray[existingIndex] = template;
+      } else {
+        template.storageKey = storageKey;
+        this.templatesArray.push(template);
+      }
+
+      await this.#storeTemplates();
+      console.log(`Successfully refreshed template: ${templateData.name}`);
+      
+    } catch (error) {
+      console.error(`Failed to refresh template ${templateData.name}:`, error);
+    }
+  }
+
   /** Generates a {@link Template} class instance from the JSON object template
+   * @deprecated Use loadSavedTemplates() instead
    */
   #loadTemplate() {
-
+    // This method is deprecated in favor of loadSavedTemplates()
   }
 
   /** Stores the JSON object of the loaded templates into TamperMonkey (GreaseMonkey) storage.
@@ -573,6 +693,14 @@ export default class TemplateManager {
           let requiredPixelCount = 0; // Global required pixel count for this imported template
           const paletteMap = new Map(); // Accumulates color counts across tiles (center pixels only)
 
+          // Create a temporary template instance for color validation during import
+          const tempTemplate = new Template({
+            displayName: displayName,
+            sortID: sortID || 0,
+            authorID: authorID || '',
+            url: templateValue.URL || '',
+          });
+
           for (const tile in tilesbase64) {
             console.log(tile);
             if (tilesbase64.hasOwnProperty(tile)) {
@@ -605,7 +733,7 @@ export default class TemplateManager {
                     if (a < 64) { continue; }
                     if (r === 222 && g === 250 && b === 206) { continue; }
                     requiredPixelCount++;
-                    const key = activeTemplate.allowedColorsSet.has(`${r},${g},${b}`) ? `${r},${g},${b}` : 'other';
+                    const key = tempTemplate.allowedColorsSet.has(`${r},${g},${b}`) ? `${r},${g},${b}` : 'other';
                     paletteMap.set(key, (paletteMap.get(key) || 0) + 1);
                   }
                 }
@@ -620,6 +748,7 @@ export default class TemplateManager {
             displayName: displayName,
             sortID: sortID || this.templatesArray?.length || 0,
             authorID: authorID || '',
+            url: templateValue.URL || '', // Store the URL if it exists
             //coords: coords
           });
           template.chunked = templateTiles;
@@ -671,5 +800,127 @@ export default class TemplateManager {
    */
   setTemplatesShouldBeDrawn(value) {
     this.templatesShouldBeDrawn = value;
+  }
+
+  /** Creates the template from a URL
+   * @param {string} url - The URL to the PNG image
+   * @param {string} name - The display name of the template
+   * @param {Array<number, number, number, number>} coords - The coordinates of the top left corner of the template
+   * @since 0.72.8
+   */
+  async createTemplateFromURL(url, name, coords) {
+    try {
+      // Creates the JSON object if it does not already exist
+      if (!this.templatesJSON) {this.templatesJSON = await this.createJSON(); console.log(`Creating JSON...`);}
+
+      this.overlay.handleDisplayStatus(`Fetching template from URL: ${url}...`);
+
+      // Fetch the image from the URL
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch image: ${response.status} ${response.statusText}`);
+      }
+
+      const blob = await response.blob();
+      
+      // Verify it's an image
+      if (!blob.type.startsWith('image/')) {
+        throw new Error(`URL does not point to an image. Content type: ${blob.type}`);
+      }
+
+      this.overlay.handleDisplayStatus(`Creating template from URL at ${coords.join(', ')}...`);
+
+      // Creates a new template instance
+      const template = new Template({
+        displayName: name,
+        sortID: 0,
+        authorID: numberToEncoded(this.userID || 0, this.encodingBase),
+        file: blob,
+        coords: coords,
+        url: url // Store the URL for refreshing
+      });
+
+      const { templateTiles, templateTilesBuffers } = await template.createTemplateTiles(this.tileSize);
+      template.chunked = templateTiles;
+
+      // Appends a child into the templates object with URL information
+      const storageKey = `${template.sortID} ${template.authorID}`;
+      template.storageKey = storageKey;
+      this.templatesJSON.templates[storageKey] = {
+        "name": template.displayName,
+        "coords": coords.join(', '),
+        "enabled": true,
+        "URL": url, // Store the URL for auto-refresh
+        "URLType": "template",
+        "lastUpdated": Date.now(), // Track when it was last updated
+        "tiles": templateTilesBuffers,
+        "palette": template.colorPalette
+      };
+
+      this.templatesArray = []; // Remove this to enable multiple templates
+      this.templatesArray.push(template);
+
+      // Display success message
+      const pixelCountFormatted = new Intl.NumberFormat().format(template.pixelCount);
+      this.overlay.handleDisplayStatus(`Template created from URL! Total pixels: ${pixelCountFormatted}`);
+
+      // Ensure color filter UI is visible when a template is created
+      try {
+        const colorUI = document.querySelector('#bm-contain-colorfilter');
+        if (colorUI) { colorUI.style.display = ''; }
+        window.postMessage({ source: 'blue-marble', bmEvent: 'bm-rebuild-color-list' }, '*');
+      } catch (_) { /* no-op */ }
+
+      await this.#storeTemplates();
+      return template;
+
+    } catch (error) {
+      console.error('Failed to create template from URL:', error);
+      this.overlay.handleDisplayStatus(`Failed to load template: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /** Manually refresh all URL-based templates
+   * This can be called from the UI to force refresh templates
+   * @since 0.72.8
+   */
+  async forceRefreshURLTemplates() {
+    try {
+      this.overlay.handleDisplayStatus('Force refreshing all URL templates...');
+      await this.refreshURLTemplates(true);
+    } catch (error) {
+      console.error('Failed to force refresh URL templates:', error);
+      this.overlay.handleDisplayStatus('Failed to refresh URL templates');
+    }
+  }
+
+  /** Check if there are any URL-based templates loaded
+   * @returns {boolean} True if there are URL-based templates
+   * @since 0.72.8
+   */
+  hasURLTemplates() {
+    if (!this.templatesJSON?.templates) return false;
+    
+    return Object.values(this.templatesJSON.templates).some(template => 
+      template.URL && template.URLType === 'template'
+    );
+  }
+
+  /** Get information about all URL templates
+   * @returns {Array} Array of URL template info objects
+   * @since 0.72.8
+   */
+  getURLTemplatesInfo() {
+    if (!this.templatesJSON?.templates) return [];
+    
+    return Object.entries(this.templatesJSON.templates)
+      .filter(([key, template]) => template.URL && template.URLType === 'template')
+      .map(([key, template]) => ({
+        name: template.name,
+        url: template.URL,
+        lastUpdated: template.lastUpdated || 0,
+        storageKey: key
+      }));
   }
 }

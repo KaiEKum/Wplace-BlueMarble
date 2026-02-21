@@ -181,9 +181,7 @@ const apiManager = new ApiManager(templateManager); // Constructs a new ApiManag
 
 overlayMain.setApiManager(apiManager); // Sets the API manager
 
-const storageTemplates = JSON.parse(GM_getValue('bmTemplates', '{}'));
-console.log(storageTemplates);
-templateManager.importJSON(storageTemplates); // Loads the templates
+// Note: Templates are now auto-loaded by the TemplateManager constructor
 
 const userSettings = JSON.parse(GM_getValue('bmUserSettings', '{}')); // Loads the user settings
 console.log(userSettings);
@@ -574,6 +572,10 @@ function buildOverlayMain() {
         .addDiv({'id': 'bm-colorfilter-list'}).buildElement()
       .buildElement()
       .addInputFile({'id': 'bm-input-file-template', 'textContent': 'Upload Template', 'accept': 'image/png, image/jpeg, image/webp, image/bmp, image/gif'}).buildElement()
+      .addDiv({'class': 'bm-url-input-container'})
+        .addText({'textContent': 'Or use URL:'}).buildElement()
+        .addInputText({'id': 'bm-input-url-template', 'placeholder': 'https://example.com/template.png'}).buildElement()
+      .buildElement()
       .addDiv({'id': 'bm-contain-buttons-template'})
         .addButton({'id': 'bm-button-enable', 'textContent': 'Enable'}, (instance, button) => {
           button.onclick = () => {
@@ -583,7 +585,8 @@ function buildOverlayMain() {
         }).buildElement()
         .addButton({'id': 'bm-button-create', 'textContent': 'Create'}, (instance, button) => {
           button.onclick = () => {
-            const input = document.querySelector('#bm-input-file-template');
+            const fileInput = document.querySelector('#bm-input-file-template');
+            const urlInput = document.querySelector('#bm-input-url-template');
 
             const coordTlX = document.querySelector('#bm-input-tx');
             if (!coordTlX.checkValidity()) {coordTlX.reportValidity(); instance.handleDisplayError('Coordinates are malformed! Did you try clicking on the canvas first?'); return;}
@@ -594,17 +597,44 @@ function buildOverlayMain() {
             const coordPxY = document.querySelector('#bm-input-py');
             if (!coordPxY.checkValidity()) {coordPxY.reportValidity(); instance.handleDisplayError('Coordinates are malformed! Did you try clicking on the canvas first?'); return;}
 
-            // Kills itself if there is no file
-            if (!input?.files[0]) {instance.handleDisplayError(`No file selected!`); return;}
+            const coordinates = [Number(coordTlX.value), Number(coordTlY.value), Number(coordPxX.value), Number(coordPxY.value)];
 
-            templateManager.createTemplate(input.files[0], input.files[0]?.name.replace(/\.[^/.]+$/, ''), [Number(coordTlX.value), Number(coordTlY.value), Number(coordPxX.value), Number(coordPxY.value)]);
-
-            // console.log(`TCoords: ${apiManager.templateCoordsTilePixel}\nCoords: ${apiManager.coordsTilePixel}`);
-            // apiManager.templateCoordsTilePixel = apiManager.coordsTilePixel; // Update template coords
-            // console.log(`TCoords: ${apiManager.templateCoordsTilePixel}\nCoords: ${apiManager.coordsTilePixel}`);
-            // templateManager.setTemplateImage(input.files[0]);
-
-            instance.handleDisplayStatus(`Drew to canvas!`);
+            // Check if URL is provided
+            const urlValue = urlInput?.value?.trim();
+            if (urlValue) {
+              // Create template from URL
+              try {
+                new URL(urlValue); // Validate URL format
+                const templateName = urlValue.split('/').pop()?.replace(/\.[^/.]+$/, '') || 'URL Template';
+                templateManager.createTemplateFromURL(urlValue, templateName, coordinates)
+                  .then(() => {
+                    instance.handleDisplayStatus(`Template created from URL!`);
+                    urlInput.value = ''; // Clear the URL input
+                  })
+                  .catch(error => {
+                    instance.handleDisplayError(`Failed to create template from URL: ${error.message}`);
+                  });
+              } catch (error) {
+                instance.handleDisplayError('Invalid URL format!');
+                return;
+              }
+            } else if (fileInput?.files[0]) {
+              // Create template from file (existing functionality)
+              templateManager.createTemplate(fileInput.files[0], fileInput.files[0]?.name.replace(/\.[^/.]+$/, ''), coordinates);
+              instance.handleDisplayStatus(`Drew to canvas!`);
+            } else {
+              instance.handleDisplayError('Please select a file or enter a URL!');
+              return;
+            }
+          }
+        }).buildElement()
+        .addButton({'id': 'bm-button-refresh-url', 'textContent': 'Refresh URLs'}, (instance, button) => {
+          button.onclick = () => {
+            if (templateManager.hasURLTemplates()) {
+              templateManager.forceRefreshURLTemplates();
+            } else {
+              instance.handleDisplayStatus('No URL templates found to refresh');
+            }
           }
         }).buildElement()
         .addButton({'id': 'bm-button-disable', 'textContent': 'Disable'}, (instance, button) => {
