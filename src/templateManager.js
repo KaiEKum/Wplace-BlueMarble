@@ -272,32 +272,82 @@ export default class TemplateManager {
       const coords = templateData.coords.split(',').map(Number);
       const url = templateData.URL;
       
-      // Use api.codetabs.com proxy for all URLs with cache busting
       const cacheBuster = `cb=${Date.now()}`;
       const urlWithCacheBuster = url.includes('?') ? `${url}&${cacheBuster}` : `${url}?${cacheBuster}`;
-      const proxiedUrl = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(urlWithCacheBuster)}`;
       
-      console.log(`Refreshing template from: ${proxiedUrl}`);
+      // Try smart direct access first, fallback to proxy
+      const blob = await this.#fetchImageWithFallback(urlWithCacheBuster, templateData.name);
       
-      const response = await fetch(proxiedUrl, {
-        method: 'GET',
-        mode: 'cors',
-        headers: {
-          'Accept': 'image/*,*/*'
-        }
-      });
-      
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const blob = await response.blob();
       await this.#processRefreshedTemplate(blob, templateData, storageKey, coords);
       console.log(`Successfully refreshed template: ${templateData.name}`);
       
     } catch (error) {
       console.error(`Failed to refresh template ${templateData.name}:`, error);
     }
+  }
+
+  /** Smart image fetching with direct access attempt and proxy fallback
+   * @param {string} url - The URL to fetch
+   * @param {string} templateName - Template name for logging
+   * @returns {Promise<Blob>} The image blob
+   * @private
+   */
+  async #fetchImageWithFallback(url, templateName = 'template') {
+    // Domains that typically allow CORS or direct access
+    const directAccessDomains = [
+      'raw.githubusercontent.com',
+      'github.com/raw',
+      'cdn.jsdelivr.net',
+      'unpkg.com',
+      'imgur.com',
+      'i.imgur.com'
+    ];
+    
+    const isDirect = directAccessDomains.some(domain => url.includes(domain));
+    
+    if (isDirect) {
+      console.log(`[${templateName}] Attempting direct access for known-good domain...`);
+      try {
+        const response = await fetch(url, {
+          method: 'GET',
+          mode: 'cors',
+          headers: {
+            'Accept': 'image/*,*/*'
+          }
+        });
+        
+        if (response.ok) {
+          console.log(`[${templateName}] ✅ Direct access successful`);
+          return await response.blob();
+        } else {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+      } catch (error) {
+        console.log(`[${templateName}] ❌ Direct access failed: ${error.message}`);
+        console.log(`[${templateName}] 🔄 Falling back to CORS proxy...`);
+      }
+    } else {
+      console.log(`[${templateName}] Using CORS proxy for unknown domain`);
+    }
+    
+    // Fallback to proxy
+    const proxiedUrl = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`;
+    console.log(`[${templateName}] Fetching via proxy: ${proxiedUrl}`);
+    
+    const response = await fetch(proxiedUrl, {
+      method: 'GET',
+      mode: 'cors',
+      headers: {
+        'Accept': 'image/*,*/*'
+      }
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Proxy fetch failed - HTTP ${response.status}: ${response.statusText}`);
+    }
+    
+    console.log(`[${templateName}] ✅ Proxy fetch successful`);
+    return await response.blob();
   }
 
   /** Helper method to process refreshed template blob
@@ -864,34 +914,20 @@ export default class TemplateManager {
       // Creates the JSON object if it does not already exist
       if (!this.templatesJSON) {this.templatesJSON = await this.createJSON(); console.log(`Creating JSON...`);}
 
-      // Use api.codetabs.com proxy for all URLs with cache busting
       const cacheBuster = `cb=${Date.now()}`;
       const urlWithCacheBuster = url.includes('?') ? `${url}&${cacheBuster}` : `${url}?${cacheBuster}`;
-      const proxiedUrl = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(urlWithCacheBuster)}`;
       
-      this.overlay.handleDisplayStatus(`Fetching template from URL via CORS proxy...`);
-      console.log(`Fetching template from: ${proxiedUrl}`);
+      this.overlay.handleDisplayStatus(`Fetching template from URL...`);
       
-      const response = await fetch(proxiedUrl, {
-        method: 'GET',
-        mode: 'cors',
-        headers: {
-          'Accept': 'image/*,*/*'
-        }
-      });
-      
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const blob = await response.blob();
+      // Use smart fetching with direct/proxy fallback
+      const blob = await this.#fetchImageWithFallback(urlWithCacheBuster, name);
       
       // Verify it's an image
       if (!blob.type.startsWith('image/')) {
         throw new Error(`URL does not point to an image. Content type: ${blob.type}`);
       }
 
-      console.log(`Successfully fetched image from URL via CORS proxy`);
+      console.log(`Successfully fetched image from URL`);
       return this.#createTemplateFromBlob(blob, name, coords, url);
 
     } catch (error) {
