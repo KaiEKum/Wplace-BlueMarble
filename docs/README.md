@@ -1,3 +1,6 @@
+## This Fork was solely for the implemtation of URL Template Imports with Cors Proxy Support for hosters like Nextcloud
+### It is now obsolete as wPlace has integrated their own Template functionality onsite
+
 <table>
   <tr>
     <td><a href="#blue-marble---url-import">Blue Marble - URL Import</a></td>
